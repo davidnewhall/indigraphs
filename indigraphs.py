@@ -1,6 +1,6 @@
 #!/usr/bin/env IndigoPluginHost -x
 #
-# Indigraphs - David Newhall II - December 2016 - v1.0.0
+# Indigraphs - David Newhall II - December 2016 - v0.0.1
 #
 # Use this script to pull data from a database and send it to graphite.
 # It's specifically designed for the SQL Logger plugin in Indigo 6 & 7,
@@ -18,23 +18,27 @@ import psycopg2
 import psycopg2.extras
 import indigo
 import graphitesend
-import time
-import re
-
 
 # Set all of these.
 DBNAME = 'indigo_history'
 DBUSER = 'administrator'
 DBPASS = ''
 DBHOST = 'localhost'
-TBNAME = 'indigo_history'
 GRAPHITE_SERVER = 'localhost'
 # Setting this to something non-true will make this script useless.
 USE_GRAPHITE = True
-
 # If you make any custom tables in this database, add them here to skip them.
 SKIP_TABLES = {'already_processed', 'eventlog_history'}
+DEBUG_LOG = False
+#DEBUG_LOG = '/tmp/indigraphs.log'
 
+
+
+def log(msg):
+    if not DEBUG_LOG:
+        return
+    time = str(indigo.server.getTime()).split('.')[0]
+    debuglog.write("[{0}] indigraphs: {1}\n".format(time, msg))
 
 #
 # Good ol' psycopg2. Such a love-hate relationship here.
@@ -45,7 +49,7 @@ def getDBconnection():
         conn = psycopg2.connect("""dbname='{0}' user='{1}' host='{2}' password='{3}'"""
                                 .format(DBNAME, DBUSER, DBHOST, DBPASS))
     except:
-        print "DB connection failure."
+        indigo.server.log("[Indigraphs] ERROR: DB connection failure.")
     return conn
 
 
@@ -61,20 +65,30 @@ def createProcessedTable(cursor):
     if not cursor.fetchone()[0]:
         sql = "CREATE TABLE already_processed (table_name VARCHAR, last_id INT);"
         cursor.execute(sql)
+    # This is a good place to retreive and return the timezone. We use it later.
+    sql = "SHOW TIMEZONE;"
+    cursor.execute(sql)
+    return cursor.fetchone()[0]
 
 
 #
-# Get devices from indigo; create dev_id->name and dev_id->type mappings.
+# Get device data from indigo.
+# Create dev_id->name, dev_id->folder and dev_id->type maps.
 #
 def getIndigoData():
-    myIndigoData = {'device': {}, 'type': {}, 'variable': {}}
+    myIndigoData = {'device': {}, 'type': {}, 'folder': {}, 'variable': {}}
     # Map IDs and Types to Device Names.
     for dev in indigo.devices:
         # This is ugly, but this is my ability. Please fix me?
         dev_type = str(dev.__class__).split("'")[1].split('.')[1]
+        if dev.folderId != 0:
+            dev_folder = indigo.devices.folders[dev.folderId].name
+        else:
+            dev_folder = 'NoFolder'
         myIndigoData['type'][dev.id] = dev_type
         # This is easy. Why can't type be this easy?
         myIndigoData['device'][dev.id] = dev.name
+        myIndigoData['folder'][dev.id] = dev_folder
     # Map IDs to Variable Names.
     for var in indigo.variables:
         myIndigoData['variable'][var.id] = var.name
@@ -101,7 +115,7 @@ def getRecentIDs(cursor):
 def getOurTableList(cursor):
     # Get list of tables to process.
     sql = """SELECT table_name FROM information_schema.tables
-             WHERE table_schema = 'public' and table_catalog='{0}'""".format(TBNAME)
+             WHERE table_schema = 'public' and table_catalog='{0}'""".format(DBNAME)
     cursor.execute(sql)
     return cursor.fetchall()
 
@@ -109,7 +123,7 @@ def getOurTableList(cursor):
 #
 # Loop the very list retreived above; run SELECT * on each table.
 #
-def getDataFromTables(cursor, tables, last_imported_ids):
+def getDataFromTables(cursor, tables, last_imported_ids, timezone):
     items_by_list = []
     # Process each table.
     for row in tables:
@@ -118,8 +132,9 @@ def getDataFromTables(cursor, tables, last_imported_ids):
         if tname in SKIP_TABLES:
             continue
         last_id = last_imported_ids.setdefault(tname, 0)
-        print "-> Processing '{0}' - Skipping to ID {1}.".format(tname, last_id)
-        sql = "SELECT * FROM {0} WHERE id > {1}".format(tname, last_id)
+        log("-> Processing '{0}' - Skipping to ID {1}.".format(tname, last_id))
+        sql = """SELECT EXTRACT(EPOCH FROM ts AT time zone '{0}') as seconds,*
+                 FROM {1} WHERE id > {2}""".format(timezone, tname, last_id)
         cursor.execute(sql)
         # Each table has different columns; save their names too.
         columns = [i[0] for i in cursor.description]
@@ -137,22 +152,27 @@ def getDataFromTables(cursor, tables, last_imported_ids):
 
 
 #
-# Take a dict of metrics, a location, a name and a timestamp. Send2graphite!
+# Take a dict of metrics, a location, a type, a name and a timestamp.
 #
-def processGraphiteMetric(graphite, metricRow, location, name, seconds):
+def processGraphiteMetric(graphite, metricRow, location, type, name, seconds):
+    skipcount = 0
+    sendcount = 0
     for col, val in metricRow.iteritems():
         try:
             # Only process columns that are numeric.
             float(val)
-            # Replace anything that is not 0-9, A-Z, a-z, -, _, / or . with _
-            name = re.sub('[^0-9a-zA-Z_\-\.\/]+', '_', name)
-            metric_name = "home.{0}.{1}.{2}".format(location, name, col)
+            metric_name = "indigraph.{0}.{1}.{2}.{3}".format(location, name, type, col)
+            # This subroutine will replace invalid characters, like spaces.
             graphite.send(metric_name, val, seconds)
-            print "Sent {0}={1} ({2})".format(metric_name, val, seconds)
+            log("Sent: {0}={1} ({2})".format(metric_name, val, seconds))
+            #print "Sent: {0}={1} ({2})".format(metric_name, val, seconds)
+            sendcount += 1
         except:
+            log("Skip: {0}.{1}.{2}.{3}={4}".format(location, name, type, col, val))
             # Wasn't numeric or graphite.send failed, keep on going...
+            skipcount += 1
             next
-
+    return [sendcount, skipcount]
 
 #
 # Update indemic database table already_processed with our freshly recorded data.
@@ -188,7 +208,7 @@ def run():
     max_id = {}
     dbconn = getDBconnection()
     cursor = dbconn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    createProcessedTable(cursor)
+    timezone = createProcessedTable(cursor)
     # This is a list of tables to query. Indigo dynamically creates
     # (and deletes) tables; difficult to know what to expect.
     indigo_tables = getOurTableList(cursor)
@@ -201,14 +221,18 @@ def run():
         graphite = graphitesend.init(graphite_server=GRAPHITE_SERVER,
                                      prefix='', system_name='')
     # SELECT * on every table to pull all the data into a list of dicts.
-    items_by_list = getDataFromTables(cursor, indigo_tables, last_imported_ids)
+    items_by_list = getDataFromTables(cursor, indigo_tables, last_imported_ids, timezone)
     # Process one row (metric line) at a time.
+    sendcount = 0
+    skipcount = 0
     for data in items_by_list:
         # Pull these out since they're a bit useless as metrics.
         table_name = data.pop('table_name')
         table_type = data.pop('table_type')
         indigo_id = data.pop('indigo_id')
         timestamp = data.pop('ts')
+        # Time since epoch of this metric.
+        seconds = data.pop('seconds')
         sql_id = data.pop('id')
         # Find our Max ID for this table so it can be updated/recorded..
         if table_name not in max_id or max_id[table_name] < sql_id:
@@ -216,20 +240,30 @@ def run():
         # Device (or variable) type. Used as part of the metric name.
         if table_type == 'variable':
             item_type = 'variable'
+            folder = 'variables'
         else:
             item_type = myIndigoData['type'][indigo_id]
+            folder = myIndigoData['folder'][indigo_id]
         item_name = myIndigoData[table_type][indigo_id]
-        # Time since epoch of this metric.
-        seconds = int(time.mktime(timestamp.timetuple()))
         if USE_GRAPHITE:
             # You could do something else with the Metric here, but what? :)
-            processGraphiteMetric(graphite, data, item_type, item_name, seconds)
-    # Store the last ID(s) processed in the db; avoid processing them again.
+            counts = processGraphiteMetric(graphite, data, folder,
+                                           item_type, item_name, seconds)
+            sendcount += counts[0]
+            skipcount += counts[1]
+    # Store the last ID(s) processed in the db;, to avoid processing them again.
     updateLastIDinSQL(cursor, last_imported_ids, max_id)
+    # Throw some data into the Indigo Log.
+    indigo.server.log("[Indigraphs] Metrics Updated: {0}, Rows Skipped: {1}, Tables Scanned: {2}"
+                      .format(sendcount, skipcount, len(indigo_tables)))
     # Done with the database
     cursor.close()
     dbconn.commit()
     dbconn.close()
 
 
+if DEBUG_LOG:
+    debuglog = open(DEBUG_LOG, 'a')
 run()
+if DEBUG_LOG:
+    debuglog.close()
