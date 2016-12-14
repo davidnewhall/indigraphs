@@ -154,25 +154,21 @@ def getDataFromTables(cursor, tables, last_imported_ids, timezone):
 #
 # Take a dict of metrics, a location, a type, a name and a timestamp.
 #
-def processGraphiteMetric(graphite, metricRow, location, type, name, seconds):
-    skipcount = 0
-    sendcount = 0
+def processGraphiteMetric(metricRow, location, type, name, seconds):
+    metrics = []
     for col, val in metricRow.iteritems():
         try:
             # Only process columns that are numeric.
             float(val)
             metric_name = "indigraph.{0}.{1}.{2}.{3}".format(location, name, type, col)
-            # This subroutine will replace invalid characters, like spaces.
-            graphite.send(metric_name, val, seconds)
             log("Sent: {0}={1} ({2})".format(metric_name, val, seconds))
             #print "Sent: {0}={1} ({2})".format(metric_name, val, seconds)
-            sendcount += 1
+            metrics.append((metric_name, val, seconds))
         except:
             log("Skip: {0}.{1}.{2}.{3}={4}".format(location, name, type, col, val))
             # Wasn't numeric or graphite.send failed, keep on going...
-            skipcount += 1
             next
-    return [sendcount, skipcount]
+    return metrics
 
 #
 # Update indemic database table already_processed with our freshly recorded data.
@@ -206,6 +202,7 @@ def updateLastIDinSQL(cursor, last_imported_ids, max_id):
 #
 def run():
     max_id = {}
+    graphite_metrics = []
     dbconn = getDBconnection()
     cursor = dbconn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     timezone = createProcessedTable(cursor)
@@ -216,10 +213,6 @@ def run():
     last_imported_ids = getRecentIDs(cursor)
     # This allows us to map device and variables IDs to names and types.
     myIndigoData = getIndigoData()
-    # Open a connection to graphite now before going into loops.
-    if USE_GRAPHITE:
-        graphite = graphitesend.init(graphite_server=GRAPHITE_SERVER,
-                                     prefix='', system_name='')
     # SELECT * on every table to pull all the data into a list of dicts.
     items_by_list = getDataFromTables(cursor, indigo_tables, last_imported_ids, timezone)
     # Process one row (metric line) at a time.
@@ -232,7 +225,7 @@ def run():
         indigo_id = data.pop('indigo_id')
         timestamp = data.pop('ts')
         # Time since epoch of this metric.
-        seconds = data.pop('seconds')
+        seconds = int(data.pop('seconds'))
         sql_id = data.pop('id')
         # Find our Max ID for this table so it can be updated/recorded..
         if table_name not in max_id or max_id[table_name] < sql_id:
@@ -247,10 +240,15 @@ def run():
         item_name = myIndigoData[table_type][indigo_id]
         if USE_GRAPHITE:
             # You could do something else with the Metric here, but what? :)
-            counts = processGraphiteMetric(graphite, data, folder,
+            metrics = processGraphiteMetric(data, folder,
                                            item_type, item_name, seconds)
-            sendcount += counts[0]
-            skipcount += counts[1]
+            sendcount += len(metrics)
+            skipcount += (len(data) - len(metrics))
+            graphite_metrics += metrics
+    if USE_GRAPHITE:
+        graphite = graphitesend.init(graphite_server=GRAPHITE_SERVER,
+                                     prefix='', system_name='')
+        graphite.send_list(graphite_metrics)
     # Store the last ID(s) processed in the db;, to avoid processing them again.
     updateLastIDinSQL(cursor, last_imported_ids, max_id)
     # Throw some data into the Indigo Log.
