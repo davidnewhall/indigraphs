@@ -13,54 +13,96 @@
 #
 # License: GPLv2 - see accompanying LICENSE file.
 
-
+from os import path
+import xml
 import psycopg2
 import psycopg2.extras
 import indigo
 import graphitesend
 
-# Set all of these.
-DBNAME = 'indigo_history'
-DBUSER = 'administrator'
-DBPASS = ''
-DBHOST = 'localhost'
 GRAPHITE_SERVER = 'localhost'
 # Setting this to something non-true will make this script useless.
 USE_GRAPHITE = True
 # If you make any custom tables in this database, add them here to skip them.
 SKIP_TABLES = {'already_processed', 'eventlog_history'}
 DEBUG_LOG = False
-#DEBUG_LOG = '/tmp/indigraphs.log'
+# DEBUG_LOG = '/tmp/indigraphs.log'
 
 
-
+# Simple hack to write a log file. Just set the variable above to a file path.
 def log(msg):
     if not DEBUG_LOG:
         return
     time = str(indigo.server.getTime()).split('.')[0]
     debuglog.write("[{0}] indigraphs: {1}\n".format(time, msg))
 
+
+#
+# This routine will read the preferences file from the SQL Logger plugin.
+# http://forums.indigodomo.com/viewtopic.php?f=108&t=11306
+#
+def readSQLLoggerPreferences():
+    configParams = dict()
+    prefFilePath6 = '/Library/Application Support/Perceptive Automation/Indigo 6/Preferences/Plugins/com.perceptiveautomation.indigoplugin.sql-logger.indiPref'
+    prefFilePath7 = '/Library/Application Support/Perceptive Automation/Indigo 7/Preferences/Plugins/com.perceptiveautomation.indigoplugin.sql-logger.indiPref'
+    # Check for version 7 first.
+    if path.isfile(prefFilePath7):
+        prefFilePath = prefFilePath7
+    elif path.isfile(prefFilePath6):
+        prefFilePath = prefFilePath6
+    else:
+        return configParams
+    preferencesDom = xml.etree.ElementTree.parse(prefFilePath)
+    prefRootNode = preferencesDom.getroot()
+    databaseTypeStr = prefRootNode.find("databaseType").text
+    try:
+        if databaseTypeStr == "postgresql":
+            configParams["dbType"] = "postgresql"
+            configParams["dbName"] = prefRootNode.find("postgresqlDatabase").text
+            configParams["serverHost"] = prefRootNode.find("postgresqlHost").text
+            configParams["sqlUsername"] = prefRootNode.find("postgresqlUser").text
+            configParams["sqlPassword"] = prefRootNode.find("postgresqlPassword").text
+        else:
+            # Anyone wanna make this script support sqllite? :)
+            configParams["dbType"] = "sqllite"
+            configParams["dbName"] = prefRootNode.find("sqliteFilePath").text
+    except:
+        pass
+    return configParams
+
+
 #
 # Good ol' psycopg2. Such a love-hate relationship here.
 # Took me a while to figure out the UPDATE syntax below. uhg.
 #
-def getDBconnection():
+def getDBconnection(configParams):
+    if "dbType" not in configParams:
+        indigo.server.log("[Indigraphs] ERROR: Unable to find SQL Logger database information.")
+        return False
+    if configParams["dbType"] != "postgresql":
+        indigo.server.log("[Indigraphs] ERROR: Only PostgreSQL is supported at this time.")
+        return False
+    dbname = configParams["dbName"]
+    dbhost = configParams["serverHost"]
+    dbuser = configParams["sqlUsername"]
+    dbpass = configParams["sqlPassword"]
     try:
-        conn = psycopg2.connect("""dbname='{0}' user='{1}' host='{2}' password='{3}'"""
-                                .format(DBNAME, DBUSER, DBHOST, DBPASS))
+        conn = psycopg2.connect("dbname='{0}' user='{1}' host='{2}' password='{3}'"
+                                .format(dbname, dbuser, dbhost, dbpass))
     except:
         indigo.server.log("[Indigraphs] ERROR: DB connection failure.")
+        return False
     return conn
 
 
 #
 # Create a table to keep track of processed rows.
 #
-def createProcessedTable(cursor):
+def createProcessedTable(cursor, dbname):
     sql = """SELECT EXISTS(SELECT 1 FROM information_schema.tables
               WHERE table_catalog='{0}' AND
                     table_schema='public' AND
-                    table_name='already_processed');""".format(DBNAME)
+                    table_name='already_processed');""".format(dbname)
     cursor.execute(sql)
     if not cursor.fetchone()[0]:
         sql = "CREATE TABLE already_processed (table_name VARCHAR, last_id INT);"
@@ -112,10 +154,10 @@ def getRecentIDs(cursor):
 #
 # Retrieve the - rather dynamic - list of tables indigo has created.
 #
-def getOurTableList(cursor):
+def getOurTableList(cursor, dbname):
     # Get list of tables to process.
     sql = """SELECT table_name FROM information_schema.tables
-             WHERE table_schema = 'public' and table_catalog='{0}'""".format(DBNAME)
+             WHERE table_schema = 'public' and table_catalog='{0}'""".format(dbname)
     cursor.execute(sql)
     return cursor.fetchall()
 
@@ -162,13 +204,14 @@ def processGraphiteMetric(metricRow, location, type, name, seconds):
             float(val)
             metric_name = "indigraph.{0}.{1}.{2}.{3}".format(location, name, type, col)
             log("Sent: {0}={1} ({2})".format(metric_name, val, seconds))
-            #print "Sent: {0}={1} ({2})".format(metric_name, val, seconds)
+            # print "Sent: {0}={1} ({2})".format(metric_name, val, seconds)
             metrics.append((metric_name, val, seconds))
         except:
             log("Skip: {0}.{1}.{2}.{3}={4}".format(location, name, type, col, val))
             # Wasn't numeric or graphite.send failed, keep on going...
             next
     return metrics
+
 
 #
 # Update indemic database table already_processed with our freshly recorded data.
@@ -203,12 +246,15 @@ def updateLastIDinSQL(cursor, last_imported_ids, max_id):
 def run():
     max_id = {}
     graphite_metrics = []
-    dbconn = getDBconnection()
+    databaseParams = readSQLLoggerPreferences()
+    dbconn = getDBconnection(databaseParams)
+    if not dbconn:
+        return
     cursor = dbconn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    timezone = createProcessedTable(cursor)
+    timezone = createProcessedTable(cursor, databaseParams["dbName"])
     # This is a list of tables to query. Indigo dynamically creates
     # (and deletes) tables; difficult to know what to expect.
-    indigo_tables = getOurTableList(cursor)
+    indigo_tables = getOurTableList(cursor, databaseParams["dbName"])
     # This is a list of the last ID processed per table; avoid re-processing.
     last_imported_ids = getRecentIDs(cursor)
     # This allows us to map device and variables IDs to names and types.
@@ -223,7 +269,7 @@ def run():
         table_name = data.pop('table_name')
         table_type = data.pop('table_type')
         indigo_id = data.pop('indigo_id')
-        timestamp = data.pop('ts')
+        data.pop('ts')
         # Time since epoch of this metric.
         seconds = int(data.pop('seconds'))
         sql_id = data.pop('id')
@@ -241,13 +287,13 @@ def run():
         if USE_GRAPHITE:
             # You could do something else with the Metric here, but what? :)
             metrics = processGraphiteMetric(data, folder,
-                                           item_type, item_name, seconds)
+                                            item_type, item_name, seconds)
             sendcount += len(metrics)
             skipcount += (len(data) - len(metrics))
             graphite_metrics += metrics
     if USE_GRAPHITE:
-        graphite = graphitesend.init(graphite_server=GRAPHITE_SERVER,
-                                     prefix='', system_name='')
+        graphite = graphitesend.init(graphite_server=GRAPHITE_SERVER, prefix='',
+                                     asynchronous=True, system_name='')
         graphite.send_list(graphite_metrics)
     # Store the last ID(s) processed in the db;, to avoid processing them again.
     updateLastIDinSQL(cursor, last_imported_ids, max_id)
