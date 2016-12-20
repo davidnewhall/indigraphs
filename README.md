@@ -105,11 +105,9 @@ mkdir -p ~/Documents/Indigo
 cd ~/Documents/Indigo
 git clone git@github.com:davidnewhall/indigraphs.git
 ````
- - I'm not sure how to pull the SQL Logger database settings from Indigo yet, so for now you'll have to edit the script and put in your SQL server info. It should just be your username if you followed this guide. The rest of the defaults are what you want.
- - `nano indigraphs.py` or `vim indigraphs.py` and fix the `DBUSER`.
- - You'll need to fix your PATH.
+ - You'll need to fix your PATH, like this:
  - `export PATH=$PATH:/usr/local/bin:/Applications/Postgres.app/Contents/Versions/latest/bin:/Library/Application\ Support/Perceptive\ Automation/Indigo\ 7/IndigoPluginHost.app/Contents/MacOS/`
- - I recommend putting this in your `.bashrc`.
+ - I recommend putting this in your `.bashrc` or `.profile` - whatever works for you.
  - There is one dependency: `sudo easy_install graphitesend`
  - Test it: `./indigraphs.py`
  - No output? It worked. Look in your Indigo Log. You should see something like `Script [Indigraphs] Metrics Updated: 1342, Rows Skipped: 1272, Tables Scanned: 58`.
@@ -119,6 +117,21 @@ git clone git@github.com:davidnewhall/indigraphs.git
 ![Execute Script.](http://www.sleepers.pro/wp-content/uploads/2016/12/update_graphite_actions.jpg "Execute Script")
 
 
-## Step 5 - Setup Graphite and add graphs.
+## Step 5 - Setup Grafana and add graphs.
+- Point your browser to port 3000 on whatever your host is that's running Indigo, possibly [http://localhost:3000/](http://localhost:3000/)
+- Add the graphite data source. Click the Grafana-logo menu in the top left, select Data Sources and click Add Data Source. Make it look like this:
 
-I'll get some more in here..
+![Grafana Data Source](http://www.sleepers.pro/wp-content/uploads/2016/12/grafana-data-source.png "Grafana Data Source")
+
+- Setup your graphs. Grafana is a little intimidating at first, but it's not that bad. There's many ways to customize graphs and make it perfect.
+- Create a new Dashboard next. I named my House Report. In the dashboard, click Add Row and select Graph. Click on the name of the row (Panel Title) and then click Edit, like this:
+
+![Grafana Edit Row](http://www.sleepers.pro/wp-content/uploads/2016/12/grafana-edit-row.png "Grafana Edit Row")
+
+- From here, you can add metrics and customize the dashboard, like this:
+
+![Grafana Add Metric](http://www.sleepers.pro/wp-content/uploads/2016/12/grafana-add-metric.png "Grafana Add Metric")
+
+- Here's a partial screenshot of my system:
+
+![Grafana](http://www.sleepers.pro/wp-content/uploads/2016/12/grafana_view-1.png "Grafana")
