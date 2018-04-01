@@ -281,8 +281,12 @@ def run():
             item_type = 'variable'
             folder = 'variables'
         else:
-            item_type = myIndigoData['type'][indigo_id]
-            folder = myIndigoData['folder'][indigo_id]
+        # If a reporting device is deleted it will error, so check if it exists
+            if (indigo_id in myIndigoData['type'] and indigo_id in myIndigoData['folder']):
+                item_type = myIndigoData['type'][indigo_id]
+                folder = myIndigoData['folder'][indigo_id]
+            else:
+                continue
         item_name = myIndigoData[table_type][indigo_id]
         if USE_GRAPHITE:
             # You could do something else with the Metric here, but what? :)
