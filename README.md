@@ -1,3 +1,6 @@
+# Deprecated
+I'm using [Grafana Home Dashboard](https://www.indigodomo.com/pluginstore/167/) now. - 2019
+
 # Indigraphs
 Graphs for Indigo Data.
 
