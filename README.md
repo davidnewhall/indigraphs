@@ -1,5 +1,6 @@
 # Deprecated
-I'm using [Grafana Home Dashboard](https://www.indigodomo.com/pluginstore/167/) now. - 2019
+- I'm using [Grafana Home Dashboard](https://www.indigodomo.com/pluginstore/167/) now. - 2019
+- See [Autotyed](https://github.com/davidnewhall/autotyed) for the full integration.
 
 # Indigraphs
 Graphs for Indigo Data.
